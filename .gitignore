@@ -1,0 +1,11 @@
+.Rproj.user
+geospatial-data/northern-ireland_*
+*.html
+R/*_files
+*.xlsx
+/.Rhistory
+.Rhistory
+.Rdata
+.httr-oauth
+.DS_Store
+.quarto

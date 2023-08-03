@@ -1,0 +1,144 @@
+---
+title: "Joining NI CoM areas to small areas and super-output areas"
+author: "Dave"
+format: html
+editor: visual
+---
+
+## Housekeeping
+
+### Libraries
+
+```{r libs}
+library(fs)
+library(sf)
+library(here)
+library(stringr)
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(carutools)
+library(vroom)
+library(ggspatial)
+```
+
+### Read in Data
+
+First, we'll read in the CoM shapefiles
+
+```{r readInComShapes}
+coms <- dir_ls(here("geospatial-data", "com-areas"))
+names(coms) <- str_extract(coms, "(?<=/)[^/]+$")
+coms <- as.list(coms)
+
+coms <- map(coms, read_sf)
+```
+
+Then we'll read in all the Northern Irish OA and dz.
+
+```{r readIndz}
+dz <- read_sf(here("geospatial-data", "northern-ireland_data-zones_2021"))
+
+dz <- select(dz,dz_2021_code = DZ2021_cd)
+
+```
+
+## Format data
+
+### Filter overlapping dz
+
+We will unionise the com shapes in order to quickly find the data zones that intersect any CoM shapes, which will make all further computations considerably less time-consuming. But first, we'll need to transform all CoM data to the same projection
+
+```{r unionizeAndFilter}
+## Reproject: transform all CoM to share projection with first element
+coms <- map(coms, \(x) st_transform(x, st_crs(dz)))
+
+## Unionise each CoM internally
+coms_simplified <- map(coms, st_union)
+coms_simplified <- map(coms_simplified, st_make_valid)
+
+coms_union <- reduce(coms_simplified, st_union)
+```
+
+### Map union of all CoM
+
+Just to make sure we're doing what we think we're doing
+
+```{r mapCoMUnion}
+ggplot(coms_union) +
+  geom_sf(fill = ca_cyan()) +
+  theme_minimal()
+```
+
+### Filter dz
+
+```{r dzFiltering}
+dz_intersections <- st_intersects(dz, coms_union, sparse = FALSE)[, 1]
+
+dz <- filter(dz, dz_intersections)
+
+nrow(dz)
+
+rm(coms_union, dz_intersections)
+```
+
+Nice!
+
+## Calculate overlaps
+
+```{r calculateOverlaps}
+
+intersecting_dz <- map(
+  coms_simplified,
+  \(x){
+    intersection <- st_intersects(dz, x, sparse = FALSE)[, 1]
+    
+    filter(dz, intersection)
+    })
+
+intersecting_dz <- map(intersecting_dz, mutate, dz_area  = st_area(geometry))
+
+suppressWarnings({
+  overlap_dz <- map2(intersecting_dz, coms_simplified, st_intersection)
+})
+
+overlap_dz <- map(overlap_dz, mutate, overlapping_area = st_area(geometry))
+
+overlap_dz <- map(overlap_dz, mutate,
+                    ratio_dz_intersection_com =
+                      round(overlapping_area / dz_area, 7))
+```
+
+### Visualise
+
+Just to check it's doing what we want
+
+```{r visualise}
+names(coms)
+
+newry_dz <- filter(dz, dz_2021_code %in% overlap_dz[["newry"]][["dz_2021_code"]])
+
+ggplot(newry_dz) + 
+  geom_sf(fill = ca_cyan(), alpha = 0.2) +
+  geom_sf(data = overlap_dz[["newry"]],
+          fill = ca_dark_teal(), alpha = 0.8, colour = ca_orange())
+```
+
+## Export overlap
+
+```{r exportOverlap}
+overlap_stats_dz <- map(overlap_dz, as_tibble)
+overlap_stats_dz <-
+  map(overlap_stats_dz, select, dz_2021_code, ratio_dz_intersection_com)
+
+dir_create(here("overlaps_com-dz"))
+
+iwalk(overlap_stats_dz,
+      \(x, y){
+        vroom_write(
+          x, 
+          file = here("overlaps_com-dz", str_c(y, ".csv")),
+          delim = ","
+          )
+      })
+```

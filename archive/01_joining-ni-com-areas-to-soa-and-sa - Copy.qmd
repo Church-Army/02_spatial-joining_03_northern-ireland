@@ -1,0 +1,190 @@
+---
+title: "Joining NI CoM areas to small areas and super-output areas"
+author: "Dave"
+format: html
+editor: visual
+---
+
+## Housekeeping
+
+### Libraries
+
+```{r libs}
+library(fs)
+library(sf)
+library(here)
+library(stringr)
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(carutools)
+library(vroom)
+library(ggspatial)
+```
+
+### Read in Data
+
+First, we'll read in the CoM shapefiles
+
+```{r readInComShapes}
+coms <- dir_ls(here("geospatial-data", "com-areas"))
+names(coms) <- str_extract(coms, "(?<=/)[^/]+$")
+coms <- as.list(coms)
+
+coms <- map(coms, read_sf)
+```
+
+Then we'll read in all the Northern Irish OA and SOA.
+
+```{r readInsoa}
+soa <- read_sf(here("geospatial-data", "civic-areas",
+                     "2011_soa-boundaries_northern-ireland"))
+
+sa <- read_sf(here("geospatial-data", "civic-areas",
+                     "2011_sa-boundaries_northern-ireland"))
+```
+
+## Format data
+
+### Filter overlapping soa
+
+We will unionise the com shapes in order to quickly find the soa that intersect any CoM shapes, which will make all further computations considerably less time-consuming. But first, we'll need to transform all CoM data to the same projection
+
+```{r unionizeAndFilter}
+## Reproject: transform all CoM to share projection with first element
+coms <- map(coms, \(x) st_transform(x, st_crs(soa)))
+
+## Unionise each CoM internally
+coms_simplified <- map(coms, st_union)
+coms_simplified <- map(coms_simplified, st_make_valid)
+
+coms_union <- reduce(coms_simplified, st_union)
+```
+
+### Map union of all CoM
+
+Just to make sure we're doing what we think we're doing
+
+```{r mapCoMUnion}
+ggplot(coms_union) +
+  geom_sf(fill = ca_cyan()) +
+  theme_minimal()
+```
+
+### Filter soa
+
+```{r soaFiltering}
+soa_intersections <- st_intersects(soa, coms_union, sparse = FALSE)[, 1]
+sa_intersections <- st_intersects(sa, coms_union, sparse = FALSE)[, 1]
+
+soa <- filter(soa, soa_intersections)
+sa  <- filter(sa,   sa_intersections)
+
+nrow(soa)
+nrow(sa)
+
+rm(coms_union, sa_intersections, soa_intersections)
+```
+
+Nice!
+
+### Tidy soa
+
+```{r tidysoa}
+soa <- select(soa, soa_11_code = SOA_CODE)
+sa   <- select(sa,   sa_11_code   = SA2011)
+```
+
+## Calculate overlaps
+
+```{r calculateOverlaps}
+intersecting_soa <- map(
+  coms_simplified,
+  \(x){
+    intersection <- st_intersects(soa, x, sparse = FALSE)[, 1]
+    
+    filter(soa, intersection)
+    })
+
+intersecting_sa <- map(
+  coms_simplified,
+  \(x){
+    intersection <- st_intersects(sa, x, sparse = FALSE)[, 1]
+    
+    filter(sa, intersection)
+    })
+
+intersecting_soa <- map(intersecting_soa,   mutate, soa_area  = st_area(geometry))
+intersecting_sa   <- map(intersecting_sa,   mutate, sa_area   = st_area(geometry))
+
+suppressWarnings({
+  overlap_soa <- map2(intersecting_soa, coms_simplified, st_intersection)
+  overlap_sa   <- map2(intersecting_sa,   coms_simplified, st_intersection)
+})
+
+overlap_soa <- map(overlap_soa, mutate, overlapping_area = st_area(geometry))
+overlap_sa   <- map(overlap_sa,   mutate, overlapping_area = st_area(geometry))
+
+overlap_soa <- map(overlap_soa, mutate,
+                    ratio_soa_intersection_com =
+                      round(overlapping_area / soa_area, 7))
+
+overlap_sa   <- map(overlap_sa, mutate,
+                    ratio_sa_intersection_com =
+                      round(overlapping_area / sa_area, 7))
+```
+
+### Visualise
+
+Just to check it's doing what we want
+
+```{r visualise}
+names(coms)
+
+newry_sa  <- filter(sa,  sa_11_code  %in%  overlap_sa[["newry"]][["sa_11_code"]] )
+newry_soa <- filter(soa, soa_11_code %in% overlap_soa[["newry"]][["soa_11_code"]])
+
+ggplot(newry_sa) + 
+  geom_sf(fill = ca_cyan(), alpha = 0.2) +
+  geom_sf(data = overlap_sa[["newry"]],
+          fill = ca_dark_teal(), alpha = 0.8, colour = ca_orange())
+
+ggplot(newry_soa) + 
+  geom_sf(fill = ca_cyan(), alpha = 0.2) +
+  geom_sf(data = overlap_soa[["newry"]],
+          fill = ca_dark_teal(), alpha = 0.8, colour = ca_orange())
+```
+
+## Export overlap
+
+```{r exportOverlap}
+overlap_stats_soa <- map(overlap_soa, as_tibble)
+overlap_stats_soa <-
+  map(overlap_stats_soa, select, soa_11_code, ratio_soa_intersection_com)
+
+dir_create(here("overlaps_com-soa"))
+
+iwalk(overlap_stats_soa,
+      \(x, y){
+        vroom_write(
+          x, 
+          file = here("overlaps_com-soa", str_c(y, ".csv")),
+          delim = ","
+          )
+      })
+
+overlap_stats_sa <- map(overlap_sa, as_tibble)
+overlap_stats_sa <-
+  map(overlap_stats_sa, select, sa_11_code, ratio_sa_intersection_com)
+
+dir_create(here("overlaps_com-sa"))
+
+iwalk(overlap_stats_sa,
+      \(x, y){
+        vroom_write(
+          x, 
+          file = here("overlaps_com-sa", str_c(y, ".csv")),
+          delim = ","
+          )
+      })
+```
